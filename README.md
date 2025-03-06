@@ -15,6 +15,26 @@ This system enables seamless order management with **event-driven architecture**
 
 ---
 
+## Architecture
+
+### Components
+1️⃣ **Order Service** - Handles order creation, updates, and retrieval.  
+2️⃣ **Inventory Service** - Manages product stock & ensures availability.  
+3️⃣ **Payment Service** - Processes payments securely.  
+4️⃣ **Notification Service** - Sends email updates to users.  
+5️⃣ **Worker Service** - Polls AWS SQS for messages & processes orders.  
+
+### 🔄 Order Flow
+1. **User places an order** via the Order Service.  
+2. The **order event** is published to AWS SQS.  
+3. **Worker Service** listens to the SQS queue & validates the order.  
+4. **Inventory Service** checks stock availability.  
+5. **Payment Service** processes the transaction.  
+6. If **successful**, an event triggers the **Notification Service** to send an **email**.  
+7. Order status is updated to **Processed or Failed** accordingly.  
+
+---
+
 ## Setup Instructions
 
 ### **1️⃣ Clone the Repository**
