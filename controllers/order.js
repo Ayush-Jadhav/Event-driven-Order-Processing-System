@@ -4,8 +4,13 @@ const User = require("../models/user");
 const { v4: uuidv4 } = require("uuid");
 const { sendMessageToSQS } = require("../utils/sqsHelper");
 const redisClient = require("../config/redisConfig");
+const mongoose = require("mongoose"); 
+const { IoTSecureTunneling, TrustedAdvisor } = require("aws-sdk");
 
 exports.createOrder = async (req, res) => {
+  // const session = await mongoose.startSession();
+  // session.startTransaction();
+
   try {
     const { items } = req.body;
     const userId = req.user.id;
@@ -15,34 +20,55 @@ exports.createOrder = async (req, res) => {
     }
 
     let totalAmount = 0;
+    const bulkUpdateOps = [];
 
-    // Validate products & check stock
+    // Fetching all products in one query
+    const productIds = items.map(item => item.productId);
+    const products = await Product.find({ _id: { $in: productIds } });
+
+    // Creating a Map for quick access
+    const productMap = new Map(products.map(product => [product._id.toString(), product]));
+
     for (const item of items) {
-      const product = await Product.findById(item.productId);
-      if (!product) 
-        return res.status(404).json({ 
-            success: false, 
-            message: `Product ${item.productId} not found` 
-        });
+      const product = productMap.get(item.productId);
 
-      if (item.quantity > product.stock) 
-        return res.status(400).json({ 
-            success: false, 
-            message: `Insufficient stock for ${product.name}` 
+      if (!product) {
+        return res.status(404).json({ 
+          success: false, 
+          message: `Product ${item.productId} not found` 
         });
+      }
+
+      if (item.quantity > product.stock) {
+        return res.status(400).json({
+          success: false,
+          message: `Insufficient stock for ${product.name}. Available: ${product.stock}, Requested: ${item.quantity}`
+        });
+      }
 
       totalAmount += product.price * item.quantity;
+
+      // Add stock decrement operation for bulk update
+      bulkUpdateOps.push({
+        updateOne: {
+          filter: { _id: product._id, stock: { $gte: item.quantity } },  // Ensure stock is available
+          update: { $inc: { stock: -item.quantity } }  // Reduce stock
+        }
+      });
     }
 
-    // Deduct stock
-    for (const item of items) {
-      await Product.findByIdAndUpdate(
-        item.productId, 
-        { $inc: { stock: -item.quantity } }, 
-        { new: true });
+    // Execute bulk update for stock decrement (Atomic Operation)
+    if (bulkUpdateOps.length > 0) {
+      const bulkWriteResult = await Product.bulkWrite(bulkUpdateOps);
+      if (bulkWriteResult.matchedCount !== items.length) {
+        return res.status(400).json({ 
+          success: false, 
+          message: "Stock update failed due to concurrency issues" 
+        });
+      }
     }
 
-    // Create order with "Pending" status
+    // Create the order
     const newOrder = await Order.create({
       orderId: uuidv4(),
       userId,
@@ -51,14 +77,11 @@ exports.createOrder = async (req, res) => {
       status: "Pending"
     });
 
+    // Add order to user's order history
+    await User.findByIdAndUpdate(userId, {$push: {orderHistory: newOrder._id}},{new: true});
 
+    // Send order message to SQS for processing
     await sendMessageToSQS({ orderId: newOrder.orderId, userId, items });
-
-    await User.findByIdAndUpdate(
-        userId,
-        { $push: { orderHistory: newOrder._id } }, 
-        { new: true }
-    );
 
     return res.status(201).json({
       success: true,
@@ -67,13 +90,18 @@ exports.createOrder = async (req, res) => {
     });
 
   } catch (err) {
+    // await session.abortTransaction();
+    // session.endSession();
+    
     console.error("Error creating order:", err);
-    return res.status(500).json({ 
-        success: false,
-        message: "Internal server error" 
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error, please try again"
     });
   }
 };
+
+
 
 
 exports.getOrderDetails = async (req, res) => {
